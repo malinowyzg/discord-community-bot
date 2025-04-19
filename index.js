@@ -1843,73 +1843,68 @@ client.commands.set('steal', {
 client.commands.set('crime', {
   async execute(message) {
     const userId = message.author.id;
-    const now = Date.now();
-    const cooldown = stealCooldowns.get(userId) || 0;
-    const timeLeft = cooldown - now;
+    const guildId = message.guild.id;
+    const userLevel = (await Levels.fetch(userId, guildId))?.level || 1;
 
-    if (timeLeft > 0) {
-      const seconds = Math.ceil(timeLeft / 1000);
-      const embed = new EmbedBuilder()
-        .setTitle('⏳ You’re Laying Low...')
-        .setDescription(`Try again in **${seconds}s**.`)
-        .setColor('#ff4444');
-      return message.reply({ embeds: [embed] });
-    }
-
+    const tier = Math.min(Math.floor(userLevel / 5), 4); // Tiers 0–4
     const crimes = [
-      '📦 Package Theft',
-      '💻 Crypto Scam',
-      '🏪 Corner Store Robbery',
-      '📞 Phone Fraud',
-      '🎯 Sneaky Pickpocket'
+      { name: 'Snatch a purse', xp: 10, rewardRange: [50, 120], failRate: 0.3 },
+      { name: 'Break into a car', xp: 15, rewardRange: [100, 200], failRate: 0.35 },
+      { name: 'Rob a corner store', xp: 25, rewardRange: [150, 300], failRate: 0.4 },
+      { name: 'Hack a crypto wallet', xp: 40, rewardRange: [250, 600], failRate: 0.45 },
+      { name: 'Heist a gang stash house', xp: 60, rewardRange: [500, 1000], failRate: 0.5 }
     ];
 
-    const chosen = crimes[Math.floor(Math.random() * crimes.length)];
+    const base = crimes[tier];
 
-    let successChance = 0.55;
-    const combo = comboBuffs.get(userId);
-    if (combo && combo.expiresAt > Date.now() && combo.bonuses.crimeBonus) {
-      successChance += 0.15;
-    }
-    const success = Math.random() < successChance;
+    // 💊 Check for boosters
+    const inventory = await getInventory(userId, guildId);
+    const usingAdderall = inventory.has('crime_boost');
+    const usingRedBull = inventory.has('xp_boost');
+    const usingDice = inventory.has('luck_dice');
 
-    let resultText = '';
-    let color = '';
-    const amount = Math.floor(Math.random() * 150) + 50;
+    let boostedSuccessChance = usingAdderall ? 0.25 : 0;
+    let xpMultiplier = usingRedBull ? 2 : 1;
 
-    let bonusXp = 10;
-    const fire = fireBuffs.get(userId) || combo;
-    if (fire && fire.expiresAt > Date.now()) {
-      bonusXp = Math.floor(bonusXp * fire.xpBoost);
-    }
+    let successChance = 1 - base.failRate + boostedSuccessChance;
+    const guaranteed = usingDice;
+    const failed = !guaranteed && Math.random() > successChance;
 
-    if (success) {
-      await addCash(userId, message.guild.id, amount);
-      await Levels.appendXp(userId, message.guild.id, bonusXp);
-      resultText = `✅ You pulled off **${chosen}** and got away with **$${amount}** + ${bonusXp} XP!`;
-      color = '#00ff88';
+    const reward = Math.floor(Math.random() * (base.rewardRange[1] - base.rewardRange[0]) + base.rewardRange[0]);
+    const xpGain = Math.floor(base.xp * xpMultiplier);
+
+    let description = '';
+    let embedColor = failed ? '#ff4444' : '#33cc66';
+
+    if (failed) {
+      description = `❌ **You tried ${base.name}... and got chased off!**\nNo rewards.${usingAdderall ? ' 💊 Wasted your Adderall.' : ''}`;
     } else {
-      await removeCash(userId, message.guild.id, Math.floor(amount / 2));
-      resultText = `🚨 You got caught trying **${chosen}** and lost **$${Math.floor(amount / 2)}**!`;
-      color = '#ff3333';
+      await addCash(userId, guildId, reward);
+      await Levels.appendXp(userId, guildId, xpGain);
+
+      description = `✅ **You pulled off: ${base.name}!**\n💸 +$${reward} | 🧠 +${xpGain} XP`;
+      if (usingAdderall) description += ' | 💊 Boosted';
+      if (usingRedBull) description += ' | ⚡ 2x XP';
+      if (usingDice) description += ' | 🎲 Guaranteed';
     }
+
+    // 🎯 Remove used items
+    if (usingAdderall) await removeItem(userId, guildId, 'crime_boost', 1);
+    if (usingRedBull) await removeItem(userId, guildId, 'xp_boost', 1);
+    if (usingDice) await removeItem(userId, guildId, 'luck_dice', 1);
 
     const embed = new EmbedBuilder()
-      .setTitle(success ? '💰 Crime Success!' : '🚨 Crime Failed!')
-      .setDescription(resultText)
-      .setFooter({ text: 'Urban Crime Network' })
-      .setColor(color)
+      .setTitle(failed ? '🚨 Crime Failed!' : '💼 Crime Success!')
+      .setDescription(description)
+      .setFooter({ text: `Crime Tier: ${tier + 1} • Level ${userLevel}` })
+      .setColor(embedColor)
       .setTimestamp();
 
-    const streak = updateWinStreak(userId, success);
-    if (success && streak >= 3) {
-      embed.addFields({ name: "🔥 Heat Check!", value: `You've pulled off ${streak} heists in a row. Risk = Reward.`, inline: false });
-    }
-
     message.channel.send({ embeds: [embed] });
-    stealCooldowns.set(userId, now + 10 * 60 * 1000); // 10 minute cooldown
   }
 });
+
+
 
 client.commands.set('wanted', {
   execute(message, args) {
@@ -2150,33 +2145,68 @@ if (combo.join(',') === 'gem,dice,skull') {
   }
 });
 
-
 client.commands.set('lurk', {
   async execute(message) {
-    const gainedXP = Math.floor(Math.random() * 10) + 1;
-    await Levels.appendXp(message.author.id, message.guild.id, gainedXP);
+    const userId = message.author.id;
+    const guildId = message.guild.id;
+    const xpGain = Math.floor(Math.random() * 5) + 10; // Slightly higher base XP
 
-    const embed = new EmbedBuilder()
-      .setTitle("🕶️ You’re Lurking in the Shadows...")
-      .setDescription(`You kept a low profile and gained **${gainedXP} XP**.`)
-      .setThumbnail(message.author.displayAvatarURL())
-      .setColor('#5555ff')
-      .setFooter({ text: "No one noticed... or did they?" });
+    await Levels.appendXp(userId, guildId, xpGain);
 
-    message.channel.send({ embeds: [embed] });
+    // 🔁 Track lurk streaks
+    global.lurkTracker = global.lurkTracker || new Map();
+    const data = global.lurkTracker.get(userId) || { count: 0, last: 0 };
 
-    // Optional: 5% chance to trigger a drama event or callout
-    if (Math.random() < 0.05) {
+    const now = Date.now();
+    const timeSinceLast = now - data.last;
+
+    // Reset if too long between lurks (30 min)
+    const count = timeSinceLast < 30 * 60 * 1000 ? data.count + 1 : 1;
+    global.lurkTracker.set(userId, { count, last: now });
+
+    // 🎁 Scaling Buffs / Events
+    let extras = '';
+    let bonusXp = 0;
+
+    if (count === 3) {
+      extras += '\n🔥 **Lurker Buff:** +10 XP every crime for 10 mins.';
+      fireBuffs.set(userId, { xpBoost: 1.5, expiresAt: now + 10 * 60 * 1000 });
+    }
+
+    if (count === 5) {
+      extras += '\n👀 You overheard a PVP secret. +1 Steal Success Rate next robbery.';
+      pvpTasks.set(userId, { crimes: 1, lastReset: now });
+    }
+
+    if (count >= 7 && count % 3 === 1) {
+      const reward = Math.floor(Math.random() * 200 + 100);
+      await addCash(userId, guildId, reward);
+      extras += `\n💸 Found a burner wallet. +$${reward}`;
+    }
+
+    // 🔥 Drama Trigger Chance
+    if (Math.random() < 0.07) {
       const dramaEmbed = new EmbedBuilder()
-        .setTitle("👀 Uh oh...")
-        .setDescription(`<@${message.author.id}> thought they could lurk... but got noticed.`)
-        .setColor('#ff4444')
-        .setFooter({ text: 'Stay invisible, or pay the price.' });
+        .setTitle("📢 Lurker Exposed!")
+        .setDescription(`<@${userId}> thought they were hidden...\nBut someone just spotted them watching from the shadows.`)
+        .setColor('#ff3333')
+        .setFooter({ text: 'Drama always finds you eventually.' });
 
       message.channel.send({ embeds: [dramaEmbed] });
     }
+
+    const embed = new EmbedBuilder()
+      .setTitle("🕶️ Lurking...")
+      .setDescription(`You gained **${xpGain} XP** for staying silent and observant.\n\n🔁 Lurk Chain: **${count}x**${extras}`)
+      .setColor('#5555ff')
+      .setThumbnail(message.author.displayAvatarURL())
+      .setFooter({ text: 'The shadows remember your footsteps...' })
+      .setTimestamp();
+
+    message.channel.send({ embeds: [embed] });
   }
 });
+
 
 client.commands.set('scavenge', {
   async execute(message) {
