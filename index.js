@@ -1400,7 +1400,10 @@ client.on('interactionCreate', async interaction => {
 
     const now = Date.now();
     if (now < (profile.raidCooldown || 0)) {
-      return interaction.editReply("🚨 You're hiding during the raid. Wait a few seconds...");
+      const msg = await interaction.editReply("🚨 Hiding...");
+      setTimeout(() => msg.edit("🚨 Sirens passing...").catch(() => {}), 2000);
+      setTimeout(() => msg.edit("💨 All clear. Wait a few more seconds...").catch(() => {}), 4000);
+      return;
     }
 
     if (customId.startsWith('buy_drug_')) {
@@ -1414,13 +1417,17 @@ client.on('interactionCreate', async interaction => {
       profile.inventory[drugId] = (profile.inventory[drugId] || 0) + 1;
       profile.stashUsed++;
 
-      // 🔥 Police Raid 12% chance
-      if (Math.random() < 0.12) {
+      // ✅ Level-based police raid frequency
+      const userXp = await Levels.fetch(user.id, interaction.guildId);
+      const level = userXp?.level || 1;
+      const raidChance = Math.max(0.15 - (level * 0.01), 0.04); // 15% at lvl 1 → 4% at high level
+
+      if (Math.random() < raidChance) {
         profile.raidCooldown = Date.now() + 10000;
         interaction.channel.send(`🚨 **POLICE RAID in progress!** 🚨\n${user.username} is ducking behind the dumpster.\n🔦🔴🔵🚓💥`);
       }
 
-      // 📦 Warn stash near full
+      // 📦 Warn if stash nearly full
       if (profile.stashUsed / profile.stashCap >= 0.9) {
         interaction.channel.send(`📦 ${user.username}'s stash is almost full! They're about to pop!`);
       }
@@ -1452,6 +1459,7 @@ client.on('interactionCreate', async interaction => {
     }
   }
 });
+
 
 function getHelpPages() {
   return [
@@ -2448,6 +2456,25 @@ function generateMarketEmbed(user, profile, balance) {
 
   return embed;
 }
+
+// ADMIN COMMAND !award @user 1000 //
+client.commands.set('award', {
+  async execute(message, args) {
+    if (!message.member.permissions.has('Administrator')) {
+      return message.reply("❌ You need admin permissions to use this command.");
+    }
+
+    const target = message.mentions.users.first();
+    const amount = parseInt(args[1]);
+
+    if (!target || isNaN(amount) || amount <= 0) {
+      return message.reply("Usage: `!award @user 500`");
+    }
+
+    await addCash(target.id, message.guild.id, amount);
+    message.channel.send(`💸 Awarded <@${target.id}> with **$${amount}** DreamworldPoints.`);
+  }
+});
 
 
 // Run this every 5 minutes
