@@ -26,8 +26,21 @@ const comboBuffs = new Map(); // userId → { expiresAt, bonuses }
 const raidStrikes = new Map(); // userId => number of raids survived
 const prisonUsers = new Map(); // userId => prisonReleaseTimestamp
 const prisonBalances = new Map(); // userId => confiscated amount
+const prisonQuests = new Map(); // userId → cooldown timestamp
 
 
+const npcNames = [
+  'SlimyLenny', 'Momo', 'ShadyRico', 'JailhouseKev', 'TinyTony',
+  'SneakyDee', 'GhostRay', 'TrapBobby', 'ElGato', 'NailsMarv',
+  'BackdoorDon', 'LilDrip', 'TwitchySteve', 'StacksMiguel', 'BoomerangJoe',
+  'WraithNiko', 'VelvetVic', 'SouthsideAli', 'FakeJerry', 'SwitchbladeCruz',
+  'QuickKash', 'SlyJuan', 'NoEyesNate', '3rdShiftShawn', 'YungCrumbs',
+  'CreditCarl', 'DiceyDan', 'TokyoSlim', 'ZazaKai', 'MetroLuther',
+  'BasementTrey', 'MuffinFace', 'BlackMarketBev', 'JuJuFlex', 'PlugsyRick',
+  'LowBatteryLou', 'WhisperKev', 'OffGridManny', 'ChapoTwin', 'FishscaleFinn',
+  'SleepyOx', 'RogueAmir', 'StickyNick', 'EchoDre', 'HazmatLeo',
+  'FugaziFred', 'DustyDrew', 'WiretapWes', 'HoodieDaz', 'CrumbsClay'
+];
 
 // Initial Turf Setup
 turfZones.set("Downtown", { owner: "heist", lastRaid: 0 });
@@ -1390,7 +1403,69 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const { message, user, customId } = interaction;
+  global.prisonRats = global.prisonRats || new Map();
+global.riotFails = global.riotFails || new Map();
+global.riotWins = global.riotWins || new Map();
+global.smuggleWins = global.smuggleWins || new Map();
 
+
+
+// 🧪 PRISON QUESTS WITH XP + REPUTATION + TRACKING
+if (customId === 'prison_smuggle') {
+  const chance = Math.random();
+  if (chance < 0.3) {
+    const release = prisonUsers.get(user.id) || Date.now();
+    prisonUsers.set(user.id, release + 2 * 60 * 1000); // Add 2 mins
+    return interaction.reply({ content: '🚨 Caught smuggling! Your release is delayed 2 mins.', ephemeral: true });
+  } else {
+    await addCash(user.id, interaction.guildId, 200);
+    await Levels.appendXp(user.id, interaction.guildId, 15); // XP boost
+
+    // 🔁 Track smuggle success
+    global.smuggleWins = global.smuggleWins || new Map();
+    global.smuggleWins.set(user.id, (global.smuggleWins.get(user.id) || 0) + 1);
+
+    return interaction.reply({ content: '📦 You smuggled a pack for $200 DreamworldPoints (+15 XP). Risky business.', ephemeral: true });
+  }
+}
+
+if (customId === 'prison_rat') {
+  global.prisonRats = global.prisonRats || new Map();
+  const randomNPC = npcNames[Math.floor(Math.random() * npcNames.length)];
+
+  global.prisonRats.set(user.id, randomNPC); // 🐀 save who they ratted on
+
+  await addCash(user.id, interaction.guildId, 100);
+  await Levels.appendXp(user.id, interaction.guildId, 10);
+
+  return interaction.reply({ content: `🐀 You ratted out **${randomNPC}**. +$100 & +10 XP... but the yard is watching.`, ephemeral: true });
+}
+
+if (customId === 'prison_riot') {
+  const result = Math.random();
+  if (result < 0.3) {
+    const release = prisonUsers.get(user.id) || Date.now();
+    prisonUsers.set(user.id, release + 2 * 60 * 1000);
+
+    global.riotFails = global.riotFails || new Map();
+    global.riotFails.set(user.id, (global.riotFails.get(user.id) || 0) + 1);
+
+    return interaction.reply({ content: '🔥 You sparked a riot... guards shut it down. No reward. +2 mins in.', ephemeral: true });
+  } else {
+    const reward = Math.floor(Math.random() * 250 + 100);
+    await addCash(user.id, interaction.guildId, reward);
+    await Levels.appendXp(user.id, interaction.guildId, 25 + Math.floor(Math.random() * 15));
+
+    global.riotWins = global.riotWins || new Map();
+    global.riotWins.set(user.id, (global.riotWins.get(user.id) || 0) + 1);
+
+    return interaction.reply({ content: `🧨 You led chaos. Got $${reward} + XP. Prison shook.`, ephemeral: true });
+  }
+}
+
+
+
+  // 💊 DEALER SYSTEM
   if (customId.startsWith('buy_drug_') || customId.startsWith('sell_drug_')) {
     const profile = dealerProfiles.get(user.id);
     const drugId = customId.split('_')[2];
@@ -2559,6 +2634,86 @@ client.commands.set('prisontotal', {
     message.channel.send(`🏦 The PrisonBot is holding $${total} DreamworldPoints from recent busts.`);
   }
 });
+
+client.commands.set('prison', {
+  async execute(message) {
+    if (message.channel.name !== 'prison') {
+      return message.reply("❌ You can only run this command in the **#prison** channel.");
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏚️ Prison Activity Menu')
+      .setDescription("Choose your path:\n\n🧪 **Smuggle** — Risky delivery job.\n🐀 **Rat** — Snitch on someone for a quick bag.\n🔥 **Riot** — Chaos with random outcomes.")
+      .setColor('#990000')
+      .setFooter({ text: 'Prison Quests – Keep your rep alive.' });
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('prison_smuggle').setLabel('🧪 Smuggle').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('prison_rat').setLabel('🐀 Rat').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('prison_riot').setLabel('🔥 Riot').setStyle(ButtonStyle.Danger)
+    );
+
+    await message.reply({ embeds: [embed], components: [row] });
+  }
+});
+
+client.commands.set('prisonrecord', {
+  async execute(message) {
+    const userId = message.author.id;
+
+    // Prison data maps
+    const ratList = global.prisonRats || new Map();
+    const riotFails = global.riotFails || new Map();
+    const riotWins = global.riotWins || new Map();
+    const smuggleWins = global.smuggleWins || new Map();
+
+    const ratted = ratList.get(userId);
+    const failed = riotFails.get(userId) || 0;
+    const riots = riotWins.get(userId) || 0;
+    const smuggles = smuggleWins.get(userId) || 0;
+
+    // Title Achievements
+    const titles = [];
+    if (riots >= 3) titles.push("🧨 Riot Lord");
+    if (ratted) titles.push("🐀 King Snitch");
+    if (smuggles >= 5) titles.push("📦 Cartel Runner");
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📂 Prison Record — ${message.author.username}`)
+      .setColor('#aa0000')
+      .setThumbnail(message.author.displayAvatarURL())
+      .addFields(
+        { name: "🐀 Ratted On", value: ratted ? `**${ratted}**` : "`None`", inline: true },
+        { name: "🔥 Failed Riots", value: `\`${failed}\``, inline: true },
+        { name: "🧨 Successful Riots", value: `\`${riots}\``, inline: true },
+        { name: "📦 Smuggle Missions", value: `\`${smuggles}\``, inline: true },
+        { name: "🏆 Titles", value: titles.length ? titles.join(" • ") : "`None unlocked yet`", inline: false }
+      )
+      .setFooter({ text: "Prison tracks everything. Even whispers." })
+      .setTimestamp();
+
+    message.reply({ embeds: [embed] });
+  }
+});
+
+
+setInterval(async () => {
+  const guild = client.guilds.cache.get(1353730054693064816);
+  const channel = guild.channels.cache.find(c => c.name === 'general'); // Or wherever !dealer is used
+  if (!channel) return;
+
+  const npc = npcNames[Math.floor(Math.random() * npcNames.length)];
+  const drug = drugs[Math.floor(Math.random() * drugs.length)];
+  const qty = Math.floor(Math.random() * 4) + 1;
+  const total = qty * (drug.base + Math.floor(Math.random() * drug.volatility));
+
+  channel.send(`🧥 **${npc}** just bought **${qty}x ${drug.name}** for **$${total}**.\nStreet prices heating up...`);
+
+  // Optional: Boost price volatility temporarily
+  for (const [uid, profile] of dealerProfiles.entries()) {
+    profile.prices[drug.id] += Math.floor(Math.random() * 30);
+  }
+}, Math.floor(Math.random() * 2 * 60 * 1000) + 120000); // every 2–4 min
 
 
 setInterval(() => {
