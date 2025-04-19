@@ -23,6 +23,9 @@ const fireBuffs = new Map(); // userId → { xpBoost: Number, expiresAt: timesta
 const lootboxCooldowns = new Map(); // userId → timestamp
 const itemComboTracker = new Map(); // userId → [last3Items]
 const comboBuffs = new Map(); // userId → { expiresAt, bonuses }
+const raidStrikes = new Map(); // userId => number of raids survived
+const prisonUsers = new Map(); // userId => prisonReleaseTimestamp
+const prisonBalances = new Map(); // userId => confiscated amount
 
 
 
@@ -1417,14 +1420,38 @@ client.on('interactionCreate', async interaction => {
       profile.inventory[drugId] = (profile.inventory[drugId] || 0) + 1;
       profile.stashUsed++;
 
-      // ✅ Level-based police raid frequency
+      // ✅ Level-based police raid frequency with prison consequence
       const userXp = await Levels.fetch(user.id, interaction.guildId);
       const level = userXp?.level || 1;
       const raidChance = Math.max(0.15 - (level * 0.01), 0.04); // 15% at lvl 1 → 4% at high level
 
       if (Math.random() < raidChance) {
         profile.raidCooldown = Date.now() + 10000;
-        interaction.channel.send(`🚨 **POLICE RAID in progress!** 🚨\n${user.username} is ducking behind the dumpster.\n🔦🔴🔵🚓💥`);
+
+        // 👮 Track raid strikes
+        const currentStrikes = raidStrikes.get(user.id) || 0;
+        const newStrikes = currentStrikes + 1;
+        raidStrikes.set(user.id, newStrikes);
+
+        interaction.channel.send(`🚨 **POLICE RAID!** ${user.username} is ducking again. Strike ${newStrikes}/3\n🔦🔴🔵🚓💥`);
+
+        if (newStrikes >= 3) {
+          const releaseTime = Date.now() + 10 * 60 * 1000;
+          prisonUsers.set(user.id, releaseTime);
+          raidStrikes.set(user.id, 0); // reset strikes
+
+          const currentBal = await getBalance(user.id, interaction.guildId);
+          const confiscated = Math.floor(currentBal);
+          await removeCash(user.id, interaction.guildId, confiscated);
+          prisonBalances.set(user.id, confiscated);
+
+          const prisonChannel = interaction.guild.channels.cache.find(c => c.name === "prison");
+          if (prisonChannel) {
+            prisonChannel.send(`🔐 <@${user.id}> got caught too many times and has been sent to prison.\nThey’ll be released <t:${Math.floor(releaseTime / 1000)}:R> unless they pay bail.`);
+          }
+
+          return interaction.editReply("🚓 Busted! You're being sent to prison...");
+        }
       }
 
       // 📦 Warn if stash nearly full
@@ -2489,6 +2516,48 @@ setInterval(() => {
 cron.schedule('0 16 * * *', () => { // 12 PM ET is 16:00 UTC
   console.log("⏰ Running daily NBA predictions...");
   runDailyPredictions(client);
+});
+
+client.commands.set('bail', {
+  async execute(message) {
+    const userId = message.author.id;
+    const release = prisonUsers.get(userId);
+
+    if (!release || Date.now() > release) {
+      return message.reply("✅ You’re not currently in prison.");
+    }
+
+    const balance = await getBalance(userId, message.guild.id);
+    const cost = Math.floor(balance * 0.3);
+
+    if (balance < cost) {
+      return message.reply(`💸 You need at least $${cost} DreamworldPoints to pay bail.`);
+    }
+
+    await removeCash(userId, message.guild.id, cost);
+    prisonUsers.delete(userId);
+
+    message.reply(`🔓 You paid **$${cost}** bail and escaped prison early.`);
+  }
+});
+
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+
+  const prisonTime = prisonUsers.get(message.author.id);
+  if (prisonTime && Date.now() < prisonTime) {
+    if (message.channel.name !== 'prison') {
+      await message.delete().catch(() => {});
+      message.author.send("⛓️ You’re in prison. Only messages in #prison are allowed until you’re released or post bail.");
+    }
+  }
+});
+
+client.commands.set('prisontotal', {
+  execute(message) {
+    const total = Array.from(prisonBalances.values()).reduce((a, b) => a + b, 0);
+    message.channel.send(`🏦 The PrisonBot is holding $${total} DreamworldPoints from recent busts.`);
+  }
 });
 
 
