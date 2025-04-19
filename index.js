@@ -1387,83 +1387,21 @@ client.on('messageCreate', async (message) => {
 client.on('interactionCreate', async interaction => {
   if (!interaction.isButton()) return;
   const { message, user, customId } = interaction;
-  const profile = dealerProfiles.get(user.id);
 
-  // 📘 Help Menu Navigation
-  if (message?.embeds?.length && (customId === 'help_next' || customId === 'help_back')) {
-    const originalUserId = message.interaction?.user?.id || user.id;
-    if (user.id !== originalUserId) {
-      return interaction.reply({ content: 'Only you can navigate this help menu.', ephemeral: true });
-    }
-
-    const currentEmbed = message.embeds[0];
-    const footerText = currentEmbed.footer?.text;
-    const match = footerText?.match(/Page (\d+) of (\d+)/);
-    if (!match) return;
-
-    let currentPage = parseInt(match[1]);
-    const totalPages = parseInt(match[2]);
-    if (customId === 'help_next') currentPage++;
-    else currentPage--;
-
-    const helpPages = getHelpPages();
-    const newEmbed = helpPages[currentPage - 1];
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('help_back').setLabel('⏮️ Back').setStyle(ButtonStyle.Primary).setDisabled(currentPage === 1),
-      new ButtonBuilder().setCustomId('help_next').setLabel('⏭️ Next').setStyle(ButtonStyle.Primary).setDisabled(currentPage === totalPages)
-    );
-
-    return interaction.update({ embeds: [newEmbed], components: [row] });
-  }
-
-  // 🛒 Shop Buy Button
-  if (customId.startsWith('buy_') && !customId.startsWith('buy_drug_')) {
-    const itemId = customId.replace('buy_', '');
-    const item = rotatingShop.find(i => i.id === itemId);
-
-    if (!item) return interaction.reply({ content: '❌ This item isn’t in today’s shop.', ephemeral: true });
-
-    const balance = await getBalance(user.id, interaction.guildId);
-    if (balance < item.value) {
-      return interaction.reply({ content: `🚫 You need $${item.value} to buy ${item.name}.`, ephemeral: true });
-    }
-
-    await removeCash(user.id, interaction.guildId, item.value);
-    await addItem(user.id, interaction.guildId, itemId, 1);
-
-    return interaction.reply({
-      content: `✅ You bought **${item.name}** for $${item.value} DreamworldPoints.`,
-      ephemeral: true
-    });
-  }
-
-  // 🧹 Sell All Common Items
-  if (customId === 'sell_commons') {
-    const inventory = await getInventory(user.id, interaction.guildId);
-    const { items: itemList } = require('./economy/items');
-    let total = 0;
-
-    for (const it of itemList) {
-      if (inventory.has(it.id) && it.rarity === 'Common') {
-        const qty = inventory.get(it.id);
-        total += qty * it.value;
-        await removeItem(user.id, interaction.guildId, it.id, qty);
-      }
-    }
-
-    await addCash(user.id, interaction.guildId, total);
-    return interaction.reply({ content: `💸 You sold all Common items for $${total} DreamworldPoints.`, ephemeral: true });
-  }
-
-  // 💊 Drug Dealer Buttons (buy_drug_[id], sell_drug_[id])
-  if (profile && (customId.startsWith('buy_drug_') || customId.startsWith('sell_drug_'))) {
+  if (customId.startsWith('buy_drug_') || customId.startsWith('sell_drug_')) {
+    const profile = dealerProfiles.get(user.id);
     const drugId = customId.split('_')[2];
-    if (!profile.prices[drugId]) {
+
+    if (!profile || !profile.prices[drugId]) {
       return interaction.reply({ content: '❌ Drug not found.', ephemeral: true });
     }
 
     await interaction.deferReply({ ephemeral: true });
+
+    const now = Date.now();
+    if (now < (profile.raidCooldown || 0)) {
+      return interaction.editReply("🚨 You're hiding during the raid. Wait a few seconds...");
+    }
 
     if (customId.startsWith('buy_drug_')) {
       const price = profile.prices[drugId];
@@ -1476,43 +1414,44 @@ client.on('interactionCreate', async interaction => {
       profile.inventory[drugId] = (profile.inventory[drugId] || 0) + 1;
       profile.stashUsed++;
 
-// Update market embed live
-const updatedBal = await getBalance(user.id, interaction.guildId);
-const updatedEmbed = generateMarketEmbed(user, profile, updatedBal);
+      // 🔥 Police Raid 12% chance
+      if (Math.random() < 0.12) {
+        profile.raidCooldown = Date.now() + 10000;
+        interaction.channel.send(`🚨 **POLICE RAID in progress!** 🚨\n${user.username} is ducking behind the dumpster.\n🔦🔴🔵🚓💥`);
+      }
 
-const channel = interaction.channel;
-const msg = await channel.messages.fetch(profile.lastMarketMessageId).catch(() => null);
-if (msg) {
-  await msg.edit({ embeds: [updatedEmbed] });
-}
+      // 📦 Warn stash near full
+      if (profile.stashUsed / profile.stashCap >= 0.9) {
+        interaction.channel.send(`📦 ${user.username}'s stash is almost full! They're about to pop!`);
+      }
 
-return interaction.editReply(`🛒 Bought 1 ${drugId} for $${price}`);
+      const updatedBal = await getBalance(user.id, interaction.guildId);
+      const updatedEmbed = generateMarketEmbed(user, profile, updatedBal);
+      const channel = interaction.channel;
+      const msg = await channel.messages.fetch(profile.lastMarketMessageId).catch(() => null);
+      if (msg) await msg.edit({ embeds: [updatedEmbed] });
 
+      return interaction.editReply(`🛒 Bought 1 ${drugId} for $${price}`);
     }
 
     if (customId.startsWith('sell_drug_')) {
       if ((profile.inventory[drugId] || 0) <= 0) return interaction.editReply("❌ You don't have any to sell.");
-
       const price = profile.prices[drugId];
+
       await addCash(user.id, interaction.guildId, price);
       profile.inventory[drugId]--;
       profile.stashUsed--;
 
       const updatedBal = await getBalance(user.id, interaction.guildId);
       const updatedEmbed = generateMarketEmbed(user, profile, updatedBal);
-      
       const channel = interaction.channel;
       const msg = await channel.messages.fetch(profile.lastMarketMessageId).catch(() => null);
-      if (msg) {
-        await msg.edit({ embeds: [updatedEmbed] });
-      }
-      
+      if (msg) await msg.edit({ embeds: [updatedEmbed] });
+
       return interaction.editReply(`💰 Sold 1 ${drugId} for $${price}`);
-      
     }
   }
 });
-
 
 function getHelpPages() {
   return [
@@ -2437,54 +2376,62 @@ client.commands.set('dealer', {
         prices: generatePrices(),
         lastPriceUpdate: Date.now(),
         lastEventTime: 0,
-        lastMarketMessageId: null // 🆕 Save the last sent market embed
+        lastMarketMessageId: null,
+        raidCooldown: 0
       });
     }
 
     const profile = dealerProfiles.get(userId);
     const now = Date.now();
 
-    if (now - profile.lastPriceUpdate > 60000) { // ⏳ Refresh every 1 minute
+    // ✅ Fix: Don't reset stash on !dealer
+    profile.inventory = profile.inventory || {};
+    profile.stashUsed = Object.values(profile.inventory).reduce((a, b) => a + b, 0);
+
+    // 🕓 Price Update
+    if (now - profile.lastPriceUpdate > 60000) {
       profile.prices = generatePrices();
       profile.lastPriceUpdate = now;
+    }
+
+    // 📈 Price spike alert
+    for (const d of drugs) {
+      const price = profile.prices[d.id];
+      if (price > d.base * 1.5) {
+        message.channel.send(`📈 ${d.name} is spiking at $${price}! Time to move fast!`);
+      }
     }
 
     const bal = await getBalance(userId, guildId);
     const embed = generateMarketEmbed(message.author, profile, bal);
 
-    // Dynamically build rows of buttons for all drugs
+    // Buttons
     const allRows = [];
     for (let i = 0; i < drugs.length; i += 2) {
       const row = new ActionRowBuilder();
-
       for (let j = i; j < i + 2 && j < drugs.length; j++) {
         const d = drugs[j];
-
         row.addComponents(
-          new ButtonBuilder()
-            .setCustomId(`buy_drug_${d.id}`)
-            .setLabel(`🛒 Buy ${d.name.replace(/[^a-zA-Z]/g, '')}`)
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`sell_drug_${d.id}`)
-            .setLabel(`💰 Sell ${d.name.replace(/[^a-zA-Z]/g, '')}`)
-            .setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId(`buy_drug_${d.id}`).setLabel(`🛒 Buy ${d.name.replace(/[^a-zA-Z]/g, '')}`).setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`sell_drug_${d.id}`).setLabel(`💰 Sell ${d.name.replace(/[^a-zA-Z]/g, '')}`).setStyle(ButtonStyle.Secondary)
         );
       }
-
       allRows.push(row);
     }
 
-    // Send the message and track the message ID for live updates
     const sent = await message.channel.send({ embeds: [embed], components: allRows });
     profile.lastMarketMessageId = sent.id;
   }
 });
 
 function generateMarketEmbed(user, profile, balance) {
+  let desc = `💰 **$${balance}** DreamworldPoints\n📦 Stash: **${profile.stashUsed}/${profile.stashCap}**`;
+  if (profile.stashUsed >= profile.stashCap) desc += ` 🔴 (FULL)`;
+  if (balance <= 100) desc += ` ⚠️ (Low Funds)`;
+
   const embed = new EmbedBuilder()
     .setTitle(`💊 Street Market — ${user.username}`)
-    .setDescription(`💰 **$${balance}** DreamworldPoints\n📦 Stash: **${profile.stashUsed}/${profile.stashCap}**`)
+    .setDescription(desc)
     .setColor('#ff55ff')
     .setFooter({ text: 'Prices update every 1 minute automatically' })
     .setTimestamp();
@@ -2501,6 +2448,7 @@ function generateMarketEmbed(user, profile, balance) {
 
   return embed;
 }
+
 
 // Run this every 5 minutes
 setInterval(() => {
